@@ -14,10 +14,10 @@ export function Card({
   padding = 'md'
 }: CardProps) {
   const variants = {
-    default: 'bg-navy-900/50 border border-white/5',
+    default: 'bg-surface/60 border border-white/[0.06]',
     glass: 'glass-card',
-    gradient: 'gradient-border',
-    elevated: 'bg-navy-900 border border-white/10 shadow-xl shadow-black/20',
+    gradient: 'ring-gradient bg-surface/70',
+    elevated: 'bg-surface-2 border border-white/10 shadow-2xl shadow-black/40',
   };
 
   const paddings = {
@@ -72,7 +72,7 @@ interface CardDescriptionProps {
 
 export function CardDescription({ children, className }: CardDescriptionProps) {
   return (
-    <p className={cn('text-sm text-gray-400 mt-1', className)}>
+    <p className={cn('text-sm text-ink-3 mt-1', className)}>
       {children}
     </p>
   );

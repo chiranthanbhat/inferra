@@ -11,11 +11,10 @@ import type {
 import { analyzeSecurityLayer } from './security';
 import { characterizePrompt } from './characterization';
 import { analyzePromptIntelligence } from './intelligence';
-import { optimizePrompt as optimizePromptV2 } from './optimizer';
 import { selectModel, createRoutingDecision } from './routing';
 import { calculateCostIntelligence } from './cost';
 import { analyzeGovernance } from './governance';
-import { rewritePromptForModel } from './modelRewriter';
+import { optimizeForModel, buildRoutingExplanation } from './modelOptimizer';
 import { v4 as uuidv4 } from 'uuid';
 
 interface PipelineConfig {
@@ -59,62 +58,70 @@ export async function runInferraPipeline(
   // Use sanitized prompt if available
   const workingPrompt = security.sanitizedPrompt || prompt;
 
-  // ==================== LAYER 2: CHARACTERIZATION ====================
+  // ==================== STAGE 1: INTENT DETECTION + COMPLEXITY ANALYSIS ====================
   const characterization = characterizePrompt(workingPrompt, systemPrompt);
 
-  // ==================== LAYER 3: PROMPT INTELLIGENCE ====================
+  // Prompt intelligence — informs (but no longer performs) optimization
   const intelligence = analyzePromptIntelligence(workingPrompt);
 
-  // ==================== LAYER 4: OPTIMIZATION ====================
-  let optimization = optimizePromptV2(workingPrompt);
-  
-  if (!fullConfig.enableOptimization) {
-    // Skip optimization, use original prompt
+  // ==================== STAGE 2: INFERRA ROUTING ENGINE → FINAL MODEL SELECTION ====================
+  // The routing engine ALWAYS decides the final model from intent, complexity, and cost.
+  // A user-selected model is treated as the *requested* baseline only — it never overrides
+  // routing, and we never optimize for it unless routing independently lands on the same model.
+  const modelSelection = selectModel(characterization, preferences);
+  const selectedModel = modelSelection.recommendedModel; // the FINAL routed model that runs the request
+
+  // Resolve the user's requested model (used purely as the cost-comparison baseline).
+  let requestedModel: AIModel | undefined;
+  if (userSelectedModel) {
+    const { getModelById } = await import('../models');
+    requestedModel = getModelById(userSelectedModel) || undefined;
+  }
+
+  // ==================== STAGE 3: MODEL-SPECIFIC PROMPT ENGINEERING + OPTIMIZATION ====================
+  // Each model has its own optimization profile — the FINAL routed model drives the rewrite.
+  let optimization, modelAwarePrompt, optimizationProfile;
+  if (fullConfig.enableOptimization) {
+    const engineered = optimizeForModel(workingPrompt, selectedModel, characterization);
+    optimization = engineered.optimization;
+    modelAwarePrompt = engineered.modelAwarePrompt;
+    optimizationProfile = engineered.profile;
+  } else {
+    const tokens = Math.ceil(workingPrompt.length / 4);
     optimization = {
       originalPrompt: workingPrompt,
       optimizedPrompt: workingPrompt,
-      originalTokens: characterization.estimatedInputTokens,
-      optimizedTokens: characterization.estimatedInputTokens,
+      originalTokens: tokens,
+      optimizedTokens: tokens,
       tokensSaved: 0,
       tokenReductionPercent: 0,
       optimizationScore: 0,
       optimizations: [],
     };
+    modelAwarePrompt = {
+      originalPrompt: workingPrompt,
+      modelOptimizedPrompt: workingPrompt,
+      targetModel: selectedModel,
+      modifications: [],
+      expectedImprovements: { qualityIncrease: 0, tokenReduction: 0, costSavings: 0 },
+    };
+    optimizationProfile = undefined;
   }
 
-  // ==================== LAYER 5: MODEL SELECTION ====================
-  let modelSelection = selectModel(characterization, preferences);
-  
-  if (!fullConfig.enableRouting && userSelectedModel) {
-    // Use user's selected model
-    const { getModelById } = await import('../models');
-    const userModel = getModelById(userSelectedModel);
-    if (userModel) {
-      modelSelection = {
-        ...modelSelection,
-        recommendedModel: userModel,
-        reason: 'User-selected model (routing disabled)',
-        confidence: 100,
-      };
-    }
-  }
-
-  // ==================== LAYER 6: MODEL-AWARE PROMPT REWRITING ====================
-  // This is where Inferra rewrites the prompt SPECIFICALLY for the selected model
-  const modelAwarePrompt = rewritePromptForModel(
-    optimization.optimizedPrompt,
-    modelSelection.recommendedModel
-  );
-
-  // ==================== LAYER 7: COST INTELLIGENCE ====================
+  // ==================== STAGE 4: COST RECALCULATION ====================
+  // Re-price using the model-specific optimized prompt on the selected model.
   const costIntelligence = calculateCostIntelligence(
     prompt,
     modelAwarePrompt.modelOptimizedPrompt,
     userSelectedModel,
-    modelSelection.recommendedModel,
+    selectedModel,
     characterization.estimatedInputTokens,
     characterization.estimatedOutputTokens
   );
+
+  const routingExplanation = optimizationProfile
+    ? buildRoutingExplanation(selectedModel, characterization, preferences?.prioritize || 'balanced', optimizationProfile, requestedModel)
+    : modelSelection.reason;
 
   // ==================== LAYER 8: GOVERNANCE ====================
   const governance = analyzeGovernance(
@@ -166,7 +173,10 @@ export async function runInferraPipeline(
     governance,
     routing,
     finalPrompt: modelAwarePrompt.modelOptimizedPrompt,
-    selectedModel: modelSelection.recommendedModel,
+    selectedModel,
+    requestedModel,
+    optimizationProfile,
+    routingExplanation,
     success: true,
     blocked: false,
   };

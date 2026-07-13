@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// ============================================
+// INFERRA CLOUD STORAGE RULES
+// Only organization members can read their org's blobs; only managers+ can
+// write; blobs are always <= 512KB. Firestore-side membership is the source
+// of truth (looked up via cross-service `firestore.get`).
+// ============================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function memberRole(orgId) {
+      return firestore.get(/databases/(default)/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.role;
+    }
+    function isMember(orgId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/organizations/$(orgId)/members/$(request.auth.uid));
+    }
+    function isOrgManager(orgId) {
+      return isMember(orgId)
+        && (memberRole(orgId) == 'owner'
+            || memberRole(orgId) == 'admin'
+            || memberRole(orgId) == 'manager');
+    }
+
+    // ---- Organization logos ----
+    match /org-logos/{orgId}/{fileName} {
+      allow read: if isMember(orgId);
+      // Raster formats only — SVG is excluded because it can carry embedded
+      // scripts (stored-XSS vector if ever served inline rather than via <img>).
+      allow write: if isOrgManager(orgId)
+        && request.resource.size < 512 * 1024
+        && request.resource.contentType.matches('image/(png|jpe?g|webp|gif)');
+      allow delete: if isOrgManager(orgId);
+    }
+
+    // Default deny.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

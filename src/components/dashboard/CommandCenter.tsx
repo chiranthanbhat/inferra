@@ -1,35 +1,41 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Send, 
-  Zap, 
-  Shield, 
-  GitBranch, 
-  DollarSign,
-  AlertTriangle,
-  CheckCircle,
-  Clock,
-  Sparkles,
-  ChevronDown,
-  RotateCcw,
-  Lock,
-  Brain
+import {
+  Send, Zap, Shield, GitBranch, DollarSign, AlertTriangle, CheckCircle,
+  Sparkles, ChevronDown, RotateCcw, Lock, Brain, Cpu, Wand2,
+  ScanSearch, Route, TrendingDown, ArrowDown, ArrowRight, MessageSquare,
+  Building2, Users,
 } from 'lucide-react';
 import { Button, Card, CardHeader, CardTitle, CardContent, Textarea, Badge } from '../ui';
 import { useStore } from '../../store/useStore';
+import { useTeamAccess } from '../../lib/teamAccess';
+import { ChatContinuation } from './ChatContinuation';
+import { UpgradeGate } from './UpgradeGate';
+import { saveChatSession, getTeamsByIds } from '../../lib/db';
 import { runInferraPipeline } from '../../lib/engine/pipeline';
 import { AI_MODELS } from '../../lib/models';
-import { formatCurrency, formatLatency, formatNumber, formatPercent } from '../../lib/utils';
-import type { InferraPipelineResult } from '../../types';
+import { formatCurrency, formatNumber, formatPercent } from '../../lib/utils';
+import type { InferraPipelineResult, Team } from '../../types';
 
 const EXAMPLE_PROMPTS = [
+  { label: 'Bloated prompt', prompt: 'I would really like you to please very carefully, thoroughly, comprehensively and extensively analyze, evaluate, assess, review and examine our business. Please carefully and thoroughly look at customer acquisition, pricing, retention, growth, risks, roadmap planning, operations, finance and competition. I really want you to thoroughly analyze all of these areas in great detail. Make sure to comprehensively review everything. Then please provide an executive summary, detailed recommendations, a roadmap, KPIs and key milestones. Keep it professional in tone for executives. Thank you so much in advance!' },
   { label: 'Simple Q&A', prompt: 'What is the capital of France?' },
-  { label: 'Code Generation', prompt: 'Write a Python function to calculate the factorial of a number recursively with proper error handling.' },
+  { label: 'Code generation', prompt: 'Write a Python function to calculate the factorial of a number recursively with proper error handling.' },
   { label: 'Summarization', prompt: 'Please help me summarize the key points: AI is transforming healthcare through early disease detection using machine learning algorithms that can analyze medical images with accuracy rivaling expert radiologists.' },
-  { label: 'Complex Analysis', prompt: 'I would like you to analyze and compare the economic policies of Keynesian and Austrian schools of thought. Could you please explain their effectiveness during different economic conditions in detail?' },
-  { label: 'Creative Writing', prompt: 'Can you please help me write a short poem about a robot discovering emotions for the first time? I need it to be creative and unique.' },
-  { label: '🔐 PII Test', prompt: 'My email is john.doe@example.com and my phone is 555-123-4567. My SSN is 123-45-6789. Please help me write a professional bio.' },
-  { label: '🔑 Secret Test', prompt: 'Here is my API key: sk-1234567890abcdefghijklmnopqrstuv. And my password is SuperSecret123! How do I store these securely?' },
+  { label: 'Complex analysis', prompt: 'I would like you to analyze and compare the economic policies of Keynesian and Austrian schools of thought. Could you please explain their effectiveness during different economic conditions in detail?' },
+  { label: 'PII test', prompt: 'My email is john.doe@example.com and my phone is 555-123-4567. My SSN is 123-45-6789. Please help me write a professional bio.' },
+  { label: 'Secret test', prompt: 'Here is my API key: sk-1234567890abcdefghijklmnopqrstuv. And my password is SuperSecret123! How do I store these securely?' },
+];
+
+const PIPELINE_STEPS = [
+  { icon: Brain, label: 'Intent' },
+  { icon: ScanSearch, label: 'Complexity' },
+  { icon: GitBranch, label: 'Candidates' },
+  { icon: Route, label: 'Model selection' },
+  { icon: Cpu, label: 'Model engineering' },
+  { icon: Wand2, label: 'Optimization' },
+  { icon: DollarSign, label: 'Cost recalc' },
+  { icon: Send, label: 'Route' },
 ];
 
 export function CommandCenter() {
@@ -38,15 +44,54 @@ export function CommandCenter() {
   const [priority, setPriority] = useState<'cost' | 'speed' | 'quality' | 'balanced'>('balanced');
   const [result, setResult] = useState<InferraPipelineResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'analysis' | 'rewrite' | 'cost' | 'security' | 'routing'>('analysis');
-  const { addRequestToHistory, organization } = useStore();
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'cost' | 'analysis' | 'security' | 'routing'>('pipeline');
+  const [limitGate, setLimitGate] = useState(false);
+  const { addRequestToHistory, organization, activeChat, startChat, user, commandTeamId, setCommandTeamId } = useStore();
+  const { myMemberships } = useTeamAccess();
+  const organizationName = organization?.name ?? 'Organization';
+  const [myTeams, setMyTeams] = useState<Team[]>([]);
+
+  // Load the teams the signed-in user belongs to so every request can be
+  // attributed to one (usage then accumulates for that team, server-verified).
+  useEffect(() => {
+    let cancelled = false;
+    const ids = myMemberships.map((m) => m.teamId);
+    if (ids.length === 0) { setMyTeams([]); return; }
+    getTeamsByIds(ids)
+      .then((t) => { if (!cancelled) setMyTeams(t.filter((x) => x.status === 'active')); })
+      .catch(() => { if (!cancelled) setMyTeams([]); });
+    return () => { cancelled = true; };
+  }, [myMemberships]);
+
+  // Default the attribution to the user's first team once loaded.
+  useEffect(() => {
+    if (!commandTeamId && myTeams.length > 0) setCommandTeamId(myTeams[0].id);
+    if (commandTeamId && myTeams.length > 0 && !myTeams.some((t) => t.id === commandTeamId)) {
+      setCommandTeamId(myTeams[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myTeams]);
+
+  const activeTeam = myTeams.find((t) => t.id === commandTeamId) ?? null;
+
+  // Accept a routed result → open the live chat. Block when the monthly limit
+  // is already exhausted (the server enforces it too; this avoids a wasted call).
+  const handleAccept = (r: InferraPipelineResult) => {
+    const limit = organization?.planLimits.requestsPerMonth ?? 100;
+    const used = organization?.usage.requestsUsed ?? 0;
+    const overLimit = !!organization && limit >= 0 && used >= limit;
+    if (overLimit) {
+      setLimitGate(true);
+      return;
+    }
+    const session = startChat(r);
+    if (user && organization) void saveChatSession(user.id, organization.id, session).catch(() => {});
+  };
 
   const handleProcess = async () => {
     if (!prompt.trim()) return;
     setIsProcessing(true);
-
-    // Simulate processing delay
-    await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 400));
+    await new Promise((resolve) => setTimeout(resolve, 700 + Math.random() * 400));
 
     const pipelineResult = await runInferraPipeline(
       prompt,
@@ -59,22 +104,28 @@ export function CommandCenter() {
         enableOptimization: organization?.settings?.enableOptimization ?? true,
         enableRouting: organization?.settings?.enableRouting ?? true,
         enableGovernance: organization?.settings?.enableGovernance ?? true,
-      }
+      },
     );
 
     setResult(pipelineResult);
+    setActiveTab('pipeline');
     setIsProcessing(false);
-
-    if (pipelineResult.success) {
-      addRequestToHistory(prompt, pipelineResult);
-    }
+    if (pipelineResult.success) addRequestToHistory(prompt, pipelineResult);
   };
 
   const handleReset = () => {
     setPrompt('');
     setResult(null);
-    setActiveTab('analysis');
+    setActiveTab('pipeline');
   };
+
+  // Chat continuation takes over the workspace once a request is accepted.
+  if (activeChat) return <ChatContinuation />;
+
+  // Monthly request limit reached → upsell instead of opening the chat.
+  if (limitGate) {
+    return <UpgradeGate plan={organization?.plan ?? 'free'} onCancel={() => setLimitGate(false)} />;
+  }
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -83,20 +134,51 @@ export function CommandCenter() {
         <Card variant="glass">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Zap size={18} className="text-yellow-400" />
+              <span className="grid place-items-center w-7 h-7 rounded-lg bg-brand-500/15 border border-brand-500/25 text-brand-300">
+                <Zap size={15} />
+              </span>
               Command Center
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* Example Prompts */}
+            {/* Request context: Organization → Team. Usage accumulates for the
+                selected team (server re-verifies membership on execute). */}
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-3">
+              <p className="eyebrow mb-2">Request context</p>
+              <div className="flex items-center gap-2 flex-wrap text-sm">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.07] text-ink-2">
+                  <Building2 size={13} className="text-brand-300" /> {organizationName}
+                </span>
+                <ArrowRight size={14} className="text-ink-3 flex-shrink-0" />
+                {myTeams.length > 0 ? (
+                  <div className="relative">
+                    <select
+                      value={commandTeamId ?? ''}
+                      onChange={(e) => setCommandTeamId(e.target.value || null)}
+                      className="appearance-none bg-black/30 border border-white/[0.08] rounded-lg pl-8 pr-8 py-1.5 text-sm text-white focus:outline-none focus:border-brand-500/50"
+                    >
+                      {myTeams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                    <Users size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                      style={{ color: activeTeam?.color ?? '#4DEEEA' }} />
+                    <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-3 pointer-events-none" />
+                  </div>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.07] text-ink-3">
+                    <Users size={13} /> No team — attributed to you
+                  </span>
+                )}
+              </div>
+            </div>
+
             <div>
-              <p className="text-xs text-gray-500 mb-2">Try an example:</p>
+              <p className="eyebrow mb-2">Try an example</p>
               <div className="flex flex-wrap gap-2">
                 {EXAMPLE_PROMPTS.map((ex) => (
                   <button
                     key={ex.label}
                     onClick={() => setPrompt(ex.prompt)}
-                    className="px-3 py-1.5 text-xs font-medium bg-white/5 hover:bg-white/10 text-gray-300 rounded-lg transition"
+                    className="px-3 py-1.5 text-xs font-medium bg-white/[0.04] hover:bg-white/[0.08] text-ink-2 rounded-lg transition border border-white/[0.06]"
                   >
                     {ex.label}
                   </button>
@@ -104,48 +186,47 @@ export function CommandCenter() {
               </div>
             </div>
 
-            {/* Prompt Input */}
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Enter your prompt here... Try including verbose language or sensitive data to see Inferra in action."
+              placeholder="Enter your prompt… Inferra detects intent, picks the best model, then rewrites the prompt for that model."
               className="h-40"
             />
 
-            {/* Options Row */}
             <div className="grid grid-cols-2 gap-4">
-              {/* Model Selection */}
               <div>
-                <label className="block text-xs text-gray-500 mb-2">User Selected Model (optional)</label>
+                <label className="block eyebrow mb-2">Your current model (optional)</label>
                 <div className="relative">
                   <select
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
-                    className="w-full bg-navy-800/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white appearance-none cursor-pointer focus:outline-none focus:border-purple-500/50"
+                    className="w-full bg-black/30 border border-white/[0.08] rounded-xl px-4 py-2.5 text-sm text-white appearance-none cursor-pointer focus:outline-none focus:border-brand-500/50"
                   >
-                    <option value="">Auto-select (Recommended)</option>
+                    <option value="">No baseline — compare to premium</option>
                     {AI_MODELS.map((model) => (
                       <option key={model.id} value={model.id}>
-                        {model.displayName} - ${model.inputCostPer1k + model.outputCostPer1k}/1K
+                        {model.displayName} — ${(model.inputCostPer1k + model.outputCostPer1k).toFixed(4)}/1K
                       </option>
                     ))}
                   </select>
-                  <ChevronDown size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <ChevronDown size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-3 pointer-events-none" />
                 </div>
+                <p className="mt-1.5 text-[0.66rem] text-ink-3 leading-tight">
+                  Baseline only — Inferra always routes to the best model and optimizes for it.
+                </p>
               </div>
 
-              {/* Priority */}
               <div>
-                <label className="block text-xs text-gray-500 mb-2">Routing Priority</label>
+                <label className="block eyebrow mb-2">Routing priority</label>
                 <div className="grid grid-cols-4 gap-1">
                   {(['cost', 'speed', 'quality', 'balanced'] as const).map((p) => (
                     <button
                       key={p}
                       onClick={() => setPriority(p)}
-                      className={`py-2 px-2 rounded-lg text-xs font-medium transition ${
+                      className={`py-2 px-1 rounded-lg text-[0.7rem] font-medium transition ${
                         priority === p
-                          ? 'bg-purple-500/30 text-purple-300 border border-purple-500/50'
-                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                          ? 'bg-brand-500/20 text-brand-200 border border-brand-500/40'
+                          : 'bg-white/[0.04] text-ink-3 hover:bg-white/[0.08] border border-transparent'
                       }`}
                     >
                       {p.charAt(0).toUpperCase() + p.slice(1)}
@@ -155,24 +236,11 @@ export function CommandCenter() {
               </div>
             </div>
 
-            {/* Actions */}
             <div className="flex gap-3 pt-2">
-              <Button
-                onClick={handleProcess}
-                disabled={!prompt.trim() || isProcessing}
-                isLoading={isProcessing}
-                className="flex-1"
-              >
-                {isProcessing ? 'Processing...' : (
-                  <>
-                    <Send size={16} />
-                    Analyze & Route
-                  </>
-                )}
+              <Button onClick={handleProcess} disabled={!prompt.trim() || isProcessing} isLoading={isProcessing} className="flex-1">
+                {isProcessing ? 'Processing…' : (<><Send size={16} />Analyze & Route</>)}
               </Button>
-              <Button variant="ghost" onClick={handleReset}>
-                <RotateCcw size={16} />
-              </Button>
+              <Button variant="ghost" onClick={handleReset}><RotateCcw size={16} /></Button>
             </div>
           </CardContent>
         </Card>
@@ -182,108 +250,90 @@ export function CommandCenter() {
       <div className="space-y-4">
         <AnimatePresence mode="wait">
           {!result ? (
-            <motion.div
-              key="empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
-              <Card variant="glass" className="h-[500px] flex items-center justify-center">
+            <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <Card variant="glass" className="h-[520px] flex items-center justify-center">
                 <div className="text-center">
-                  <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
-                    <Brain size={28} className="text-gray-500" />
+                  <div className="w-16 h-16 rounded-2xl bg-white/[0.04] border border-white/[0.07] flex items-center justify-center mx-auto mb-4">
+                    <Cpu size={26} className="text-ink-3" />
                   </div>
-                  <h4 className="font-semibold text-gray-300 mb-2">Ready to Analyze</h4>
-                  <p className="text-sm text-gray-500 max-w-xs">
-                    Enter a prompt to see how Inferra analyzes, optimizes, and routes your AI request.
+                  <h4 className="font-semibold text-ink-2 mb-2">Ready to route</h4>
+                  <p className="text-sm text-ink-3 max-w-xs">
+                    Enter a prompt to watch Inferra detect intent, select a model, and optimize the prompt for it.
                   </p>
                 </div>
               </Card>
             </motion.div>
           ) : (
-            <motion.div
-              key="results"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              className="space-y-4"
-            >
-              {/* Status Banner */}
-              <div className={`rounded-xl p-4 ${
-                result.blocked 
-                  ? 'bg-red-500/10 border border-red-500/30' 
-                  : 'bg-green-500/10 border border-green-500/30'
-              }`}>
+            <motion.div key="results" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-4">
+              {/* Status */}
+              <div className={`rounded-xl p-4 border ${result.blocked ? 'bg-error-500/10 border-error-500/25' : 'bg-success-500/10 border-success-500/25'}`}>
                 <div className="flex items-center gap-3">
-                  {result.blocked ? (
-                    <AlertTriangle size={24} className="text-red-400" />
-                  ) : (
-                    <CheckCircle size={24} className="text-green-400" />
-                  )}
+                  {result.blocked ? <AlertTriangle size={22} className="text-error-400" /> : <CheckCircle size={22} className="text-success-400" />}
                   <div>
-                    <p className={`font-semibold ${result.blocked ? 'text-red-300' : 'text-green-300'}`}>
-                      {result.blocked ? 'Request Blocked' : 'Request Approved & Routed'}
+                    <p className={`font-semibold ${result.blocked ? 'text-error-300' : 'text-success-300'}`}>
+                      {result.blocked ? 'Request blocked' : 'Routed & optimized'}
                     </p>
-                    <p className={`text-sm ${result.blocked ? 'text-red-400/80' : 'text-green-400/80'}`}>
+                    <p className={`text-sm ${result.blocked ? 'text-error-400/80' : 'text-success-400/80'}`}>
                       {result.blocked ? result.blockReason : `Processed in ${result.processingTimeMs}ms`}
                     </p>
                   </div>
                 </div>
               </div>
 
-              {/* Quick Stats */}
               {!result.blocked && (
-                <div className="grid grid-cols-4 gap-3">
-                  <div className="bg-white/5 rounded-xl p-3 text-center">
-                    <DollarSign size={18} className="mx-auto text-green-400 mb-1" />
-                    <p className="text-lg font-bold text-white">{formatCurrency(result.costIntelligence.routedCost.totalCost, 4)}</p>
-                    <p className="text-xs text-gray-500">Final Cost</p>
+                <>
+                  {/* Requested → Selected → Optimized-for routing summary */}
+                  <RoutingSummary result={result} />
+
+                  {/* Selected model + quick economics */}
+                  <div className="grid grid-cols-4 gap-3">
+                    <Stat icon={<Cpu size={16} className="text-brand-300" />} value={result.selectedModel.displayName} label="Selected model" small />
+                    <Stat icon={<DollarSign size={16} className="text-ink-3" />} value={formatCurrency(result.costIntelligence.originalCost.totalCost, 4)} label="Original cost" />
+                    <Stat icon={<Sparkles size={16} className="text-accent-400" />} value={formatCurrency(result.costIntelligence.routedCost.totalCost, 4)} label="Inferra cost" />
+                    <Stat icon={<TrendingDown size={16} className="text-success-400" />} value={formatPercent(result.costIntelligence.totalSavings.percentSaved)} label="Saved" accent />
                   </div>
-                  <div className="bg-white/5 rounded-xl p-3 text-center">
-                    <TrendingDown size={18} className="mx-auto text-purple-400 mb-1" />
-                    <p className="text-lg font-bold text-white">{formatPercent(result.costIntelligence.totalSavings.percentSaved)}</p>
-                    <p className="text-xs text-gray-500">Saved</p>
+
+                  {/* Accept & continue into the routed model's chat */}
+                  <div className="ring-gradient bg-gradient-to-br from-brand-500/[0.10] to-accent-500/[0.06] rounded-xl p-4 flex items-center gap-4">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-white flex items-center gap-1.5">
+                        <MessageSquare size={14} className="text-brand-300" /> Continue to chat
+                      </p>
+                      <p className="text-xs text-ink-3 mt-0.5">
+                        Opens a live session on {result.selectedModel.displayName} — the optimized prompt is sent automatically.
+                      </p>
+                    </div>
+                    <Button onClick={() => handleAccept(result)} className="flex-shrink-0">
+                      Accept &amp; Continue <ArrowRight size={16} />
+                    </Button>
                   </div>
-                  <div className="bg-white/5 rounded-xl p-3 text-center">
-                    <Clock size={18} className="mx-auto text-yellow-400 mb-1" />
-                    <p className="text-lg font-bold text-white">{formatLatency(result.routing.estimatedLatency)}</p>
-                    <p className="text-xs text-gray-500">Est. Latency</p>
+
+                  {/* Tabs */}
+                  <div className="flex gap-1.5 border-b border-white/[0.07] pb-2 overflow-x-auto hide-scrollbar">
+                    {(['pipeline', 'cost', 'analysis', 'security', 'routing'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setActiveTab(tab)}
+                        className={`px-3.5 py-1.5 text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                          activeTab === tab ? 'bg-brand-500/15 text-brand-200' : 'text-ink-3 hover:text-white hover:bg-white/[0.04]'
+                        }`}
+                      >
+                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                      </button>
+                    ))}
                   </div>
-                  <div className="bg-white/5 rounded-xl p-3 text-center">
-                    <Sparkles size={18} className="mx-auto text-blue-400 mb-1" />
-                    <p className="text-lg font-bold text-white">{result.modelSelection.confidence}%</p>
-                    <p className="text-xs text-gray-500">Confidence</p>
-                  </div>
-                </div>
+
+                  <Card variant="glass" padding="none">
+                    <div className="p-6 max-h-[460px] overflow-y-auto">
+                      {activeTab === 'pipeline' && <PipelineTab result={result} originalPrompt={prompt} />}
+                      {activeTab === 'cost' && <CostTab result={result} />}
+                      {activeTab === 'analysis' && <AnalysisTab result={result} />}
+                      {activeTab === 'security' && <SecurityTab result={result} />}
+                      {activeTab === 'routing' && <RoutingTab result={result} />}
+                    </div>
+                  </Card>
+                </>
               )}
-
-              {/* Tab Navigation */}
-              <div className="flex gap-2 border-b border-white/10 pb-2">
-                {(['analysis', 'rewrite', 'cost', 'security', 'routing'] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setActiveTab(tab)}
-                    className={`px-4 py-2 text-sm font-medium rounded-lg transition ${
-                      activeTab === tab
-                        ? 'bg-purple-500/20 text-purple-300'
-                        : 'text-gray-400 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                  </button>
-                ))}
-              </div>
-
-              {/* Tab Content */}
-              <Card variant="glass" padding="none">
-                <div className="p-6 max-h-[400px] overflow-y-auto">
-                  {activeTab === 'analysis' && <AnalysisTab result={result} />}
-                  {activeTab === 'rewrite' && <RewriteTab result={result} originalPrompt={prompt} />}
-                  {activeTab === 'cost' && <CostTab result={result} />}
-                  {activeTab === 'security' && <SecurityTab result={result} />}
-                  {activeTab === 'routing' && <RoutingTab result={result} />}
-                </div>
-              </Card>
             </motion.div>
           )}
         </AnimatePresence>
@@ -292,292 +342,303 @@ export function CommandCenter() {
   );
 }
 
-function TrendingDown(props: any) {
-  return <DollarSign {...props} />;
-}
+/* ───────────────────── Requested → Selected → Optimized-for summary ───────────────────── */
 
-function AnalysisTab({ result }: { result: InferraPipelineResult }) {
+function RoutingSummary({ result }: { result: InferraPipelineResult }) {
+  const requested = result.requestedModel;
+  const selected = result.selectedModel;
+  const optimizedFor = result.modelAwarePrompt.targetModel;
+  const rerouted = !!requested && requested.id !== selected.id;
+  const savings = result.costIntelligence.totalSavings.percentSaved;
+
   return (
-    <div className="space-y-6">
-      {/* Characterization */}
-      <div>
-        <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-          <Brain size={16} className="text-blue-400" />
-          Prompt Characterization
-        </h4>
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-gray-500 text-xs">Task Type</p>
-            <p className="text-white font-medium capitalize">{result.characterization.taskCategory.replace('-', ' ')}</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-gray-500 text-xs">Complexity</p>
-            <p className="text-white font-medium capitalize">{result.characterization.complexity}</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-gray-500 text-xs">Intent</p>
-            <p className="text-white font-medium capitalize">{result.characterization.intent}</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3">
-            <p className="text-gray-500 text-xs">Est. Tokens</p>
-            <p className="text-white font-medium">{formatNumber(result.characterization.estimatedInputTokens + result.characterization.estimatedOutputTokens)}</p>
-          </div>
+    <div className="ring-gradient bg-gradient-to-br from-brand-500/12 to-accent-500/8 rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="min-w-0">
+          <p className="eyebrow">Requested</p>
+          <p className="text-sm font-semibold text-ink-2 truncate">{requested ? requested.displayName : 'Auto-select'}</p>
+        </div>
+        <ArrowRight size={16} className="text-brand-300 flex-shrink-0" />
+        <div className="min-w-0">
+          <p className="eyebrow">Inferra selected</p>
+          <p className="text-sm font-semibold text-white truncate">
+            {selected.displayName} <span className="text-ink-3 font-normal capitalize">· {selected.provider}</span>
+          </p>
+        </div>
+        {rerouted && <Badge variant="primary" size="sm">Re-routed</Badge>}
+        <div className="ml-auto text-right">
+          <p className="eyebrow">Expected savings</p>
+          <p className="text-lg font-bold text-success-400 tabular leading-none">{formatPercent(savings)}</p>
         </div>
       </div>
 
-      {/* Intelligence */}
-      <div>
-        <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-          <Sparkles size={16} className="text-purple-400" />
-          Prompt Intelligence
-        </h4>
-        <div className="grid grid-cols-3 gap-3 text-sm mb-3">
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-2xl font-bold text-green-400">{result.intelligence.qualityScore}</p>
-            <p className="text-xs text-gray-500">Quality</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-2xl font-bold text-red-400">{result.intelligence.wasteScore}</p>
-            <p className="text-xs text-gray-500">Waste</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-2xl font-bold text-blue-400">{result.intelligence.optimizationScore}</p>
-            <p className="text-xs text-gray-500">Optimization</p>
-          </div>
-        </div>
-        {result.intelligence.issues.length > 0 && (
-          <div className="space-y-2">
-            {result.intelligence.issues.slice(0, 3).map((issue, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs">
-                <Badge variant={issue.severity === 'high' ? 'danger' : issue.severity === 'medium' ? 'warning' : 'default'} size="sm">
-                  {issue.severity}
-                </Badge>
-                <span className="text-gray-400">{issue.description}</span>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.05] border border-white/[0.08] text-xs text-brand-200">
+          <Wand2 size={12} /> Optimized for {optimizedFor.displayName}
+        </span>
+        {rerouted && requested && (
+          <span className="text-xs text-ink-3">not {requested.displayName} — the prompt targets the model that runs it</span>
+        )}
+      </div>
+
+      <p className="text-sm text-ink-2 leading-relaxed">{result.routingExplanation || result.modelSelection.reason}</p>
+    </div>
+  );
+}
+
+function Metric({ label, value, suffix = '', sub, tone = 'text-white' }: { label: string; value: number; suffix?: string; sub?: string; tone?: string }) {
+  return (
+    <div className="bg-black/25 border border-white/[0.05] rounded-lg px-2.5 py-2 text-center">
+      <p className={`text-base font-bold tabular ${tone}`}>{value}{suffix}</p>
+      <p className="text-[0.62rem] text-ink-3 leading-tight mt-0.5">{label}{sub ? ` ${sub}` : ''}</p>
+    </div>
+  );
+}
+
+function Stat({ icon, value, label, accent, small }: { icon: React.ReactNode; value: string; label: string; accent?: boolean; small?: boolean }) {
+  return (
+    <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-3 text-center">
+      <div className="flex justify-center mb-1">{icon}</div>
+      <p className={`font-bold text-white tabular ${small ? 'text-[0.8rem] leading-tight truncate' : 'text-lg'} ${accent ? 'text-success-400' : ''}`}>{value}</p>
+      <p className="text-[0.65rem] text-ink-3 mt-0.5">{label}</p>
+    </div>
+  );
+}
+
+/* ───────────────────── Pipeline tab — the new linear story ───────────────────── */
+
+function PipelineTab({ result, originalPrompt }: { result: InferraPipelineResult; originalPrompt: string }) {
+  const profile = result.optimizationProfile;
+  const opt = result.optimization;
+  const origTokens = opt.originalTokens;
+  const optTokens = opt.optimizedTokens;
+  const savedPct = opt.tokenReductionPercent;
+  const candidates = result.modelSelection.comparison?.models?.slice(0, 5) ?? [];
+
+  return (
+    <div className="space-y-5">
+      {/* Step rail */}
+      <div className="flex items-center justify-between gap-1 overflow-x-auto hide-scrollbar pb-1">
+        {PIPELINE_STEPS.map((s, i) => {
+          const Icon = s.icon;
+          return (
+            <div key={s.label} className="flex items-center gap-1 flex-shrink-0">
+              <div className="flex flex-col items-center gap-1.5 w-[68px] text-center">
+                <span className="grid place-items-center w-8 h-8 rounded-lg bg-brand-500/12 border border-brand-500/25 text-brand-300">
+                  <Icon size={15} />
+                </span>
+                <span className="text-[0.6rem] text-ink-3 leading-tight">{s.label}</span>
               </div>
-            ))}
+              {i < PIPELINE_STEPS.length - 1 && <div className="w-3 h-px bg-white/15 flex-shrink-0 mb-4" />}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Routing decision */}
+      <div className="ring-gradient bg-gradient-to-br from-brand-500/12 to-accent-500/8 rounded-xl p-4">
+        <div className="flex items-center gap-3">
+          <span className="grid place-items-center w-11 h-11 rounded-xl bg-gradient-to-br from-brand-500 to-accent-600 text-white">
+            <Cpu size={20} />
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="text-[0.7rem] text-ink-3">Selected model</p>
+            <p className="text-base font-semibold text-white">
+              {result.selectedModel.displayName} <span className="text-ink-3 font-normal capitalize">· {result.selectedModel.provider}</span>
+            </p>
+          </div>
+          <Badge variant="primary" size="md">{Math.round(result.modelSelection.confidence)}% confident</Badge>
+        </div>
+        {profile && (
+          <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.05] border border-white/[0.08] text-xs text-brand-200">
+            <Wand2 size={12} /> {profile.label}
+          </div>
+        )}
+        <p className="mt-3 text-sm text-ink-2 leading-relaxed">{result.routingExplanation || result.modelSelection.reason}</p>
+        {candidates.length > 1 && (
+          <div className="mt-3 pt-3 border-t border-white/[0.07]">
+            <p className="eyebrow mb-2">Candidates considered</p>
+            <div className="flex flex-wrap gap-1.5">
+              {candidates.map((m) => {
+                const win = m.id === result.selectedModel.id;
+                return (
+                  <span key={m.id} className={`px-2 py-0.5 rounded-md text-[0.7rem] border ${win ? 'bg-brand-500/20 text-brand-200 border-brand-500/40 font-medium' : 'bg-white/[0.03] text-ink-3 border-white/[0.06]'}`}>
+                    {m.displayName}{win ? ' ✓' : ''}
+                  </span>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Optimization */}
-      <div>
-        <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-          <Zap size={16} className="text-yellow-400" />
-          Optimization Results
-        </h4>
-        <div className="grid grid-cols-3 gap-3 text-sm">
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-lg font-bold text-white">{result.optimization.originalTokens}</p>
-            <p className="text-xs text-gray-500">Original</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-lg font-bold text-green-400">{result.optimization.optimizedTokens}</p>
-            <p className="text-xs text-gray-500">Optimized</p>
-          </div>
-          <div className="bg-white/5 rounded-lg p-3 text-center">
-            <p className="text-lg font-bold text-purple-400">-{result.optimization.tokenReductionPercent}%</p>
-            <p className="text-xs text-gray-500">Reduction</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+      {/* Original prompt */}
+      <PromptBlock
+        index={1}
+        title="Original prompt"
+        tone="neutral"
+        text={originalPrompt}
+        badge={`${origTokens} tokens`}
+      />
 
-function RewriteTab({ result, originalPrompt }: { result: InferraPipelineResult; originalPrompt: string }) {
-  const originalTokens = Math.ceil(originalPrompt.length / 4);
-  const optimizedTokens = Math.ceil(result.optimization.optimizedPrompt.length / 4);
-  const rewrittenTokens = Math.ceil(result.modelAwarePrompt.modelOptimizedPrompt.length / 4);
-  
-  const totalTokensSaved = originalTokens - rewrittenTokens;
-  const totalPercentSaved = originalTokens > 0 ? Math.round((totalTokensSaved / originalTokens) * 100) : 0;
-
-  return (
-    <div className="space-y-6">
-      {/* Summary */}
-      <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 border border-purple-500/30 rounded-xl p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h4 className="text-lg font-bold text-white">Model-Aware Rewriting</h4>
-            <p className="text-sm text-gray-400">
-              Prompt rewritten specifically for <span className="text-purple-300 font-medium">{result.selectedModel.displayName}</span>
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-2xl font-bold text-green-400">-{totalPercentSaved}%</p>
-            <p className="text-xs text-gray-500">{totalTokensSaved} tokens saved</p>
-          </div>
+      <div className="flex items-center justify-center">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-brand-500/10 border border-brand-500/20 text-xs text-brand-200">
+          <ArrowDown size={13} />
+          {profile ? `${profile.label} for ${result.selectedModel.displayName}` : 'Model-specific engineering'}
         </div>
       </div>
 
-      {/* Three-Stage Transformation */}
-      <div className="space-y-4">
-        {/* Stage 1: Original */}
-        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full bg-red-500/30 flex items-center justify-center text-xs font-bold text-red-300">1</span>
-              <span className="text-sm font-semibold text-red-300">Original Prompt</span>
-            </div>
-            <Badge variant="danger" size="sm">{originalTokens} tokens</Badge>
-          </div>
-          <div className="bg-black/20 rounded-lg p-3 max-h-24 overflow-y-auto">
-            <p className="text-sm text-gray-300 font-mono whitespace-pre-wrap">{originalPrompt}</p>
-          </div>
-        </div>
+      {/* Model-specific prompt */}
+      <PromptBlock
+        index={2}
+        title="Model-specific prompt"
+        tone="brand"
+        text={result.modelAwarePrompt.modelOptimizedPrompt}
+        badge={`${optTokens} tokens · −${savedPct}%`}
+      />
 
-        {/* Arrow */}
-        <div className="flex items-center justify-center">
-          <div className="flex items-center gap-2 px-4 py-2 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
-            <Zap size={16} className="text-yellow-400" />
-            <span className="text-xs font-medium text-yellow-300">Layer 4: Optimization</span>
-            <span className="text-xs text-yellow-400">(-{result.optimization.tokenReductionPercent}%)</span>
-          </div>
-        </div>
-
-        {/* Stage 2: Optimized */}
-        <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full bg-yellow-500/30 flex items-center justify-center text-xs font-bold text-yellow-300">2</span>
-              <span className="text-sm font-semibold text-yellow-300">After Basic Optimization</span>
-            </div>
-            <Badge variant="warning" size="sm">{optimizedTokens} tokens</Badge>
-          </div>
-          <div className="bg-black/20 rounded-lg p-3 max-h-24 overflow-y-auto">
-            <p className="text-sm text-gray-300 font-mono whitespace-pre-wrap">{result.optimization.optimizedPrompt}</p>
-          </div>
-          {result.optimization.optimizations.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {result.optimization.optimizations.slice(0, 3).map((opt, i) => (
-                <span key={i} className="text-xs px-2 py-0.5 bg-yellow-500/20 text-yellow-300 rounded">
-                  {opt.description}
-                </span>
-              ))}
-            </div>
+      {/* Optimization scoring */}
+      <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="eyebrow">Optimization scoring</p>
+          {opt.validationPassed === false ? (
+            <Badge variant="danger" size="sm">Optimization failed</Badge>
+          ) : (
+            <Badge variant="success" size="sm">Validated</Badge>
           )}
         </div>
-
-        {/* Arrow */}
-        <div className="flex items-center justify-center">
-          <div className="flex items-center gap-2 px-4 py-2 bg-purple-500/10 rounded-lg border border-purple-500/20">
-            <Sparkles size={16} className="text-purple-400" />
-            <span className="text-xs font-medium text-purple-300">Layer 6: Model-Aware Rewrite for {result.selectedModel.displayName}</span>
-          </div>
+        <div className="grid grid-cols-4 gap-2 mb-3">
+          <Metric label="Original" value={origTokens} sub="tokens" />
+          <Metric label="Optimized" value={optTokens} sub="tokens" tone="text-accent-400" />
+          <Metric label="Removed" value={opt.tokensSaved} sub="tokens" tone="text-success-400" />
+          <Metric label="Compression" value={savedPct} suffix="%" tone="text-gradient-brand" />
         </div>
+        <div className="grid grid-cols-3 gap-2">
+          <Metric label="Quality" value={opt.qualityScore ?? opt.optimizationScore} suffix="/100" />
+          <Metric label="Intent kept" value={opt.intentScore ?? 100} suffix="/100" />
+          <Metric label="Confidence" value={opt.confidenceScore ?? 0} suffix="/100" />
+        </div>
+        {opt.validationMessage && (
+          <p className="mt-3 text-xs text-error-300 flex items-start gap-1.5">
+            <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />{opt.validationMessage}
+          </p>
+        )}
+      </div>
 
-        {/* Stage 3: Model-Aware Rewritten */}
-        <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <span className="w-6 h-6 rounded-full bg-green-500/30 flex items-center justify-center text-xs font-bold text-green-300">3</span>
-              <span className="text-sm font-semibold text-green-300">Final Model-Optimized Prompt</span>
-            </div>
-            <Badge variant="success" size="sm">{rewrittenTokens} tokens</Badge>
-          </div>
-          <div className="bg-black/20 rounded-lg p-3 max-h-32 overflow-y-auto">
-            <p className="text-sm text-gray-300 font-mono whitespace-pre-wrap">{result.modelAwarePrompt.modelOptimizedPrompt}</p>
-          </div>
-          {result.modelAwarePrompt.modifications.length > 0 && (
-            <div className="mt-3 space-y-1">
-              <p className="text-xs text-gray-500 font-medium">Model-Specific Modifications:</p>
-              {result.modelAwarePrompt.modifications.map((mod, i) => (
-                <div key={i} className="flex items-start gap-2 text-xs">
-                  <span className="text-green-400">✓</span>
-                  <span className="text-gray-400">{mod.description}</span>
-                  <span className="text-gray-500">— {mod.reason}</span>
+      {/* Structured reconstruction */}
+      {opt.sections && opt.sections.length > 0 && (
+        <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4">
+          <p className="eyebrow mb-3">Structured reconstruction</p>
+          <div className="space-y-3">
+            {opt.sections.map((sec) => (
+              <div key={sec.title}>
+                <p className="text-[0.72rem] font-semibold text-brand-200 uppercase tracking-wide mb-1.5">{sec.title}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {sec.items.map((it, i) => (
+                    <span key={i} className="px-2 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06] text-xs text-ink-2">{it}</span>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Model Style Explanation */}
-      <div className="bg-white/5 rounded-xl p-4">
-        <h5 className="text-sm font-semibold text-gray-300 mb-2 flex items-center gap-2">
-          <Brain size={14} className="text-purple-400" />
-          Why {result.selectedModel.displayName}?
-        </h5>
-        <p className="text-sm text-gray-400">
-          {result.selectedModel.promptStyle === 'instruction-following' && 
-            `${result.selectedModel.displayName} excels at following direct instructions. The prompt was rewritten to be imperative and clear, removing unnecessary preambles.`}
-          {result.selectedModel.promptStyle === 'deep-reasoning' && 
-            `${result.selectedModel.displayName} performs best with step-by-step reasoning. The prompt was structured to encourage thorough analysis.`}
-          {result.selectedModel.promptStyle === 'long-context' && 
-            `${result.selectedModel.displayName} handles massive context windows. The prompt was structured with clear section markers.`}
-          {result.selectedModel.promptStyle === 'cost-efficient' && 
-            `${result.selectedModel.displayName} is optimized for cost. The prompt was aggressively compressed by removing all unnecessary tokens.`}
-          {result.selectedModel.promptStyle === 'conversational' && 
-            `${result.selectedModel.displayName} excels at natural conversation. The prompt maintains a conversational tone while being efficient.`}
-        </p>
+      {/* Modifications */}
+      {result.modelAwarePrompt.modifications.length > 0 && (
+        <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4">
+          <p className="eyebrow mb-3">How it was rewritten for {result.selectedModel.displayName}</p>
+          <div className="space-y-2">
+            {result.modelAwarePrompt.modifications.map((mod, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <CheckCircle size={13} className="text-brand-300 flex-shrink-0 mt-0.5" />
+                <span className="text-ink-2">{mod.description}</span>
+                <span className="text-ink-3">— {mod.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {profile && (
+        <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4">
+          <h5 className="text-sm font-semibold text-white mb-1.5 flex items-center gap-2">
+            <Brain size={14} className="text-brand-300" /> Why this profile?
+          </h5>
+          <p className="text-sm text-ink-3 leading-relaxed">{profile.description}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromptBlock({ index, title, text, badge, tone }: { index: number; title: string; text: string; badge: string; tone: 'neutral' | 'brand' }) {
+  return (
+    <div className={`rounded-xl p-4 border ${tone === 'brand' ? 'bg-brand-500/[0.07] border-brand-500/25' : 'bg-white/[0.03] border-white/[0.07]'}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className={`grid place-items-center w-5 h-5 rounded-full text-[0.65rem] font-bold ${tone === 'brand' ? 'bg-brand-500/30 text-brand-200' : 'bg-white/10 text-ink-2'}`}>{index}</span>
+          <span className={`text-sm font-semibold ${tone === 'brand' ? 'text-brand-200' : 'text-ink-2'}`}>{title}</span>
+        </div>
+        <Badge variant={tone === 'brand' ? 'primary' : 'default'} size="sm">{badge}</Badge>
+      </div>
+      <div className="bg-black/30 rounded-lg p-3 max-h-32 overflow-y-auto">
+        <p className="text-sm text-ink-2 font-mono whitespace-pre-wrap leading-relaxed">{text}</p>
       </div>
     </div>
   );
 }
+
+/* ───────────────────── Cost tab ───────────────────── */
 
 function CostTab({ result }: { result: InferraPipelineResult }) {
-  const { originalCost, optimizedCost, routedCost, promptSavings, routingSavings, totalSavings } = result.costIntelligence;
+  const { originalCost, routedCost, totalSavings } = result.costIntelligence;
 
   return (
-    <div className="space-y-6">
-      {/* Cost Comparison Visual */}
-      <div className="space-y-4">
-        {/* Original */}
-        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
+    <div className="space-y-5">
+      <div className="space-y-3">
+        <div className="bg-white/[0.03] border border-white/[0.07] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-red-300 font-medium">Original Cost ({originalCost.model})</span>
-            <span className="text-2xl font-bold text-red-400">{formatCurrency(originalCost.totalCost, 4)}</span>
+            <span className="text-sm text-ink-2 font-medium">Original cost <span className="text-ink-3">· {originalCost.model}, original prompt</span></span>
+            <span className="text-2xl font-bold text-white tabular">{formatCurrency(originalCost.totalCost, 4)}</span>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-xs text-red-300/80">
+          <div className="grid grid-cols-3 gap-2 text-xs text-ink-3 tabular">
             <span>{formatNumber(originalCost.inputTokens)} input</span>
             <span>{formatNumber(originalCost.outputTokens)} output</span>
             <span>{formatNumber(originalCost.totalTokens)} total</span>
           </div>
         </div>
 
-        {/* Optimized */}
-        <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-yellow-300 font-medium">After Optimization (Same Model)</span>
-            <span className="text-2xl font-bold text-yellow-400">{formatCurrency(optimizedCost.totalCost, 4)}</span>
-          </div>
-          <div className="flex items-center gap-4 text-xs">
-            <span className="text-yellow-300/80">{formatNumber(optimizedCost.totalTokens)} tokens</span>
-            <Badge variant="success" size="sm">-{formatPercent(promptSavings.percentSaved)} prompt savings</Badge>
-          </div>
-        </div>
+        <div className="flex justify-center"><ArrowDown size={16} className="text-ink-3" /></div>
 
-        {/* Routed */}
-        <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4">
+        <div className="bg-brand-500/[0.07] border border-brand-500/25 rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-green-300 font-medium">After Routing ({routedCost.model})</span>
-            <span className="text-2xl font-bold text-green-400">{formatCurrency(routedCost.totalCost, 4)}</span>
+            <span className="text-sm text-brand-200 font-medium">Inferra cost <span className="text-ink-3">· {routedCost.model}, optimized prompt</span></span>
+            <span className="text-2xl font-bold text-white tabular">{formatCurrency(routedCost.totalCost, 4)}</span>
           </div>
-          <div className="flex items-center gap-4 text-xs">
-            <span className="text-green-300/80">{formatNumber(routedCost.totalTokens)} tokens</span>
-            <Badge variant="success" size="sm">-{formatPercent(routingSavings.percentSaved)} routing savings</Badge>
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-ink-3 tabular">{formatNumber(routedCost.totalTokens)} tokens</span>
+            <Badge variant="success" size="sm">−{formatPercent(totalSavings.percentSaved)} vs original</Badge>
           </div>
         </div>
       </div>
 
-      {/* Total Savings */}
-      <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 border border-purple-500/30 rounded-xl p-6 text-center">
-        <p className="text-sm text-gray-400 mb-2">Total Savings</p>
+      <div className="ring-gradient bg-gradient-to-r from-brand-500/12 to-accent-500/8 rounded-xl p-6 text-center">
+        <p className="eyebrow mb-3">Savings</p>
         <div className="flex items-center justify-center gap-4">
           <div>
-            <p className="text-3xl font-bold text-white">{formatCurrency(totalSavings.totalSaved, 4)}</p>
-            <p className="text-xs text-gray-500">saved this request</p>
+            <p className="text-3xl font-bold text-white tabular">{formatCurrency(totalSavings.totalSaved, 4)}</p>
+            <p className="text-xs text-ink-3">this request</p>
           </div>
           <div className="w-px h-12 bg-white/10" />
           <div>
-            <p className="text-3xl font-bold gradient-text">{formatPercent(totalSavings.percentSaved)}</p>
-            <p className="text-xs text-gray-500">reduction</p>
+            <p className="text-3xl font-bold text-gradient-brand tabular">{formatPercent(totalSavings.percentSaved)}</p>
+            <p className="text-xs text-ink-3">reduction</p>
           </div>
           <div className="w-px h-12 bg-white/10" />
           <div>
-            <p className="text-3xl font-bold text-green-400">{formatCurrency(totalSavings.annualProjection)}</p>
-            <p className="text-xs text-gray-500">annual projection</p>
+            <p className="text-3xl font-bold text-success-400 tabular">{formatCurrency(totalSavings.annualProjection)}</p>
+            <p className="text-xs text-ink-3">annual projection</p>
           </div>
         </div>
       </div>
@@ -585,75 +646,111 @@ function CostTab({ result }: { result: InferraPipelineResult }) {
   );
 }
 
-function SecurityTab({ result }: { result: InferraPipelineResult }) {
-  const { security } = result;
+/* ───────────────────── Analysis tab ───────────────────── */
 
+function AnalysisTab({ result }: { result: InferraPipelineResult }) {
   return (
     <div className="space-y-6">
-      {/* Scores */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white/5 rounded-xl p-4 text-center">
-          <p className="text-3xl font-bold text-green-400">{security.securityScore}</p>
-          <p className="text-xs text-gray-500">Security Score</p>
-        </div>
-        <div className="bg-white/5 rounded-xl p-4 text-center">
-          <p className={`text-3xl font-bold ${security.riskScore > 50 ? 'text-red-400' : security.riskScore > 20 ? 'text-yellow-400' : 'text-green-400'}`}>
-            {security.riskScore}
-          </p>
-          <p className="text-xs text-gray-500">Risk Score</p>
+      <div>
+        <p className="eyebrow mb-3 flex items-center gap-2"><Brain size={13} className="text-brand-300" /> Intent & complexity</p>
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <Field label="Task type" value={result.characterization.taskCategory.replace('-', ' ')} />
+          <Field label="Complexity" value={result.characterization.complexity} />
+          <Field label="Intent" value={result.characterization.intent} />
+          <Field label="Est. tokens" value={formatNumber(result.characterization.estimatedInputTokens + result.characterization.estimatedOutputTokens)} />
         </div>
       </div>
 
-      {/* Detections */}
+      <div>
+        <p className="eyebrow mb-3 flex items-center gap-2"><Sparkles size={13} className="text-brand-300" /> Prompt intelligence</p>
+        <div className="grid grid-cols-3 gap-3 text-sm mb-3">
+          <Score value={result.intelligence.qualityScore} label="Quality" tone="text-success-400" />
+          <Score value={result.intelligence.wasteScore} label="Waste" tone="text-error-400" />
+          <Score value={result.intelligence.optimizationScore} label="Optimization" tone="text-accent-400" />
+        </div>
+        {result.intelligence.issues.length > 0 && (
+          <div className="space-y-2">
+            {result.intelligence.issues.slice(0, 3).map((issue, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                <Badge variant={issue.severity === 'high' ? 'danger' : issue.severity === 'medium' ? 'warning' : 'default'} size="sm">{issue.severity}</Badge>
+                <span className="text-ink-3">{issue.description}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <p className="eyebrow mb-3 flex items-center gap-2"><Wand2 size={13} className="text-brand-300" /> Model-specific optimization</p>
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <Score value={result.optimization.originalTokens} label="Original" tone="text-white" raw />
+          <Score value={result.optimization.optimizedTokens} label="Optimized" tone="text-success-400" raw />
+          <Score value={result.optimization.tokenReductionPercent} label="Reduction" tone="text-brand-300" suffix="%" minus raw />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white/[0.03] border border-white/[0.05] rounded-lg p-3">
+      <p className="text-ink-3 text-xs">{label}</p>
+      <p className="text-white font-medium capitalize">{value}</p>
+    </div>
+  );
+}
+function Score({ value, label, tone, suffix = '', minus, raw }: { value: number; label: string; tone: string; suffix?: string; minus?: boolean; raw?: boolean }) {
+  return (
+    <div className="bg-white/[0.03] border border-white/[0.05] rounded-lg p-3 text-center">
+      <p className={`${raw ? 'text-lg' : 'text-2xl'} font-bold tabular ${tone}`}>{minus ? '−' : ''}{value}{suffix}</p>
+      <p className="text-xs text-ink-3">{label}</p>
+    </div>
+  );
+}
+
+/* ───────────────────── Security tab ───────────────────── */
+
+function SecurityTab({ result }: { result: InferraPipelineResult }) {
+  const { security } = result;
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 text-center">
+          <p className="text-3xl font-bold text-success-400 tabular">{security.securityScore}</p>
+          <p className="text-xs text-ink-3">Security score</p>
+        </div>
+        <div className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-4 text-center">
+          <p className={`text-3xl font-bold tabular ${security.riskScore > 50 ? 'text-error-400' : security.riskScore > 20 ? 'text-warning-400' : 'text-success-400'}`}>{security.riskScore}</p>
+          <p className="text-xs text-ink-3">Risk score</p>
+        </div>
+      </div>
       <div className="space-y-4">
-        {/* Secrets */}
-        <div className={`rounded-xl p-4 ${security.hasSecrets ? 'bg-red-500/10 border border-red-500/20' : 'bg-green-500/10 border border-green-500/20'}`}>
+        <div className={`rounded-xl p-4 border ${security.hasSecrets ? 'bg-error-500/10 border-error-500/20' : 'bg-success-500/10 border-success-500/20'}`}>
           <div className="flex items-center gap-2 mb-2">
-            <Lock size={16} className={security.hasSecrets ? 'text-red-400' : 'text-green-400'} />
-            <span className={`text-sm font-medium ${security.hasSecrets ? 'text-red-300' : 'text-green-300'}`}>
-              {security.hasSecrets ? 'Secrets Detected!' : 'No Secrets Detected'}
-            </span>
+            <Lock size={16} className={security.hasSecrets ? 'text-error-400' : 'text-success-400'} />
+            <span className={`text-sm font-medium ${security.hasSecrets ? 'text-error-300' : 'text-success-300'}`}>{security.hasSecrets ? 'Secrets detected' : 'No secrets detected'}</span>
           </div>
-          {security.hasSecrets && (
-            <div className="flex flex-wrap gap-2">
-              {security.secretTypes.map((type) => (
-                <Badge key={type} variant="danger" size="sm">{type}</Badge>
-              ))}
-            </div>
-          )}
+          {security.hasSecrets && <div className="flex flex-wrap gap-2">{security.secretTypes.map((t) => <Badge key={t} variant="danger" size="sm">{t}</Badge>)}</div>}
         </div>
-
-        {/* PII */}
-        <div className={`rounded-xl p-4 ${security.hasPII ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-green-500/10 border border-green-500/20'}`}>
+        <div className={`rounded-xl p-4 border ${security.hasPII ? 'bg-warning-500/10 border-warning-500/20' : 'bg-success-500/10 border-success-500/20'}`}>
           <div className="flex items-center gap-2 mb-2">
-            <Shield size={16} className={security.hasPII ? 'text-yellow-400' : 'text-green-400'} />
-            <span className={`text-sm font-medium ${security.hasPII ? 'text-yellow-300' : 'text-green-300'}`}>
-              {security.hasPII ? 'PII Detected' : 'No PII Detected'}
-            </span>
+            <Shield size={16} className={security.hasPII ? 'text-warning-400' : 'text-success-400'} />
+            <span className={`text-sm font-medium ${security.hasPII ? 'text-warning-300' : 'text-success-300'}`}>{security.hasPII ? 'PII detected' : 'No PII detected'}</span>
           </div>
-          {security.hasPII && (
-            <div className="flex flex-wrap gap-2">
-              {security.piiTypes.map((type) => (
-                <Badge key={type} variant="warning" size="sm">{type}</Badge>
-              ))}
-            </div>
-          )}
+          {security.hasPII && <div className="flex flex-wrap gap-2">{security.piiTypes.map((t) => <Badge key={t} variant="warning" size="sm">{t}</Badge>)}</div>}
         </div>
-
-        {/* Compliance */}
         {security.complianceViolations.length > 0 && (
-          <div className="bg-orange-500/10 border border-orange-500/20 rounded-xl p-4">
+          <div className="bg-warning-500/10 border border-warning-500/20 rounded-xl p-4">
             <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle size={16} className="text-orange-400" />
-              <span className="text-sm font-medium text-orange-300">Compliance Warnings</span>
+              <AlertTriangle size={16} className="text-warning-400" />
+              <span className="text-sm font-medium text-warning-300">Compliance warnings</span>
             </div>
             <div className="space-y-2">
               {security.complianceViolations.map((v, i) => (
                 <div key={i} className="flex items-center gap-2 text-xs">
-                  <Badge variant={v.severity === 'critical' ? 'danger' : 'warning'} size="sm">
-                    {v.framework.toUpperCase()}
-                  </Badge>
-                  <span className="text-gray-400">{v.description}</span>
+                  <Badge variant={v.severity === 'critical' ? 'danger' : 'warning'} size="sm">{v.framework.toUpperCase()}</Badge>
+                  <span className="text-ink-3">{v.description}</span>
                 </div>
               ))}
             </div>
@@ -664,66 +761,58 @@ function SecurityTab({ result }: { result: InferraPipelineResult }) {
   );
 }
 
+/* ───────────────────── Routing tab ───────────────────── */
+
 function RoutingTab({ result }: { result: InferraPipelineResult }) {
   const { modelSelection, routing } = result;
-
   return (
     <div className="space-y-6">
-      {/* Selected Model */}
-      <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 border border-purple-500/30 rounded-xl p-6">
+      <div className="ring-gradient bg-gradient-to-r from-brand-500/12 to-accent-500/8 rounded-xl p-6">
         <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-xl bg-purple-500/30 flex items-center justify-center text-2xl font-bold text-purple-300">
+          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-brand-500 to-accent-600 flex items-center justify-center text-xl font-bold text-white">
             {modelSelection.recommendedModel.displayName.charAt(0)}
           </div>
           <div className="flex-1">
             <p className="text-lg font-bold text-white">{modelSelection.recommendedModel.displayName}</p>
-            <p className="text-sm text-gray-400 capitalize">{modelSelection.recommendedModel.provider}</p>
+            <p className="text-sm text-ink-3 capitalize">{modelSelection.recommendedModel.provider}</p>
           </div>
           <div className="text-right">
-            <p className="text-2xl font-bold text-purple-300">{routing.confidence}%</p>
-            <p className="text-xs text-gray-500">confidence</p>
+            <p className="text-2xl font-bold text-brand-300 tabular">{Math.round(routing.confidence)}%</p>
+            <p className="text-xs text-ink-3">confidence</p>
           </div>
         </div>
-        <p className="mt-4 text-sm text-gray-400">{modelSelection.reason}</p>
+        <p className="mt-4 text-sm text-ink-2">{result.routingExplanation || modelSelection.reason}</p>
       </div>
 
-      {/* Routing Factors */}
       <div>
-        <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-          <GitBranch size={16} className="text-purple-400" />
-          Routing Factors
-        </h4>
+        <p className="eyebrow mb-3 flex items-center gap-2"><GitBranch size={13} className="text-brand-300" /> Routing factors</p>
         <div className="space-y-3">
           {modelSelection.factors.map((factor) => (
-            <div key={factor.name} className="bg-white/5 rounded-lg p-3">
+            <div key={factor.name} className="bg-white/[0.03] border border-white/[0.05] rounded-lg p-3">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-300">{factor.name}</span>
-                <span className="text-sm font-medium text-white">{Math.round(factor.score)}/100</span>
+                <span className="text-sm text-ink-2">{factor.name}</span>
+                <span className="text-sm font-medium text-white tabular">{Math.round(factor.score)}/100</span>
               </div>
-              <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-purple-500 to-blue-500 rounded-full"
-                  style={{ width: `${factor.score}%` }}
-                />
+              <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-brand-500 to-accent-500 rounded-full" style={{ width: `${factor.score}%` }} />
               </div>
-              <p className="text-xs text-gray-500 mt-1">{factor.description}</p>
+              <p className="text-xs text-ink-3 mt-1">{factor.description}</p>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Alternatives */}
       {modelSelection.alternatives.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-gray-300 mb-3">Alternative Models</h4>
+          <p className="eyebrow mb-3">Alternatives considered</p>
           <div className="space-y-2">
             {modelSelection.alternatives.map((alt) => (
-              <div key={alt.model.id} className="bg-white/5 rounded-lg p-3 flex items-center justify-between">
+              <div key={alt.model.id} className="bg-white/[0.03] border border-white/[0.05] rounded-lg p-3 flex items-center justify-between">
                 <div>
                   <p className="text-sm text-white">{alt.model.displayName}</p>
-                  <p className="text-xs text-gray-500">{alt.reason}</p>
+                  <p className="text-xs text-ink-3">{alt.reason}</p>
                 </div>
-                <span className="text-sm text-gray-400">{Math.round(alt.score)}</span>
+                <span className="text-sm text-ink-3 tabular">{Math.round(alt.score)}</span>
               </div>
             ))}
           </div>

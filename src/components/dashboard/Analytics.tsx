@@ -17,7 +17,7 @@ import {
   Cell,
 } from 'recharts';
 
-const COLORS = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'];
+const COLORS = ['#4deeea', '#7dd3fc', '#34d399', '#fbbf24', '#fb7185', '#38bdf8'];
 
 export function Analytics() {
   const { stats, requestHistory } = useStore();
@@ -73,11 +73,11 @@ export function Analytics() {
         <Card variant="glass">
           <CardContent className="pt-6">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-green-500/20 flex items-center justify-center">
-                <TrendingDown size={20} className="text-green-400" />
+              <div className="w-10 h-10 rounded-xl bg-success-500/15 border border-success-500/20 flex items-center justify-center">
+                <TrendingDown size={20} className="text-success-400" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Savings Rate</p>
+                <p className="text-sm text-ink-2">Savings Rate</p>
                 <p className="text-2xl font-bold text-white">{formatPercent(savingsRate)}</p>
               </div>
             </div>
@@ -87,11 +87,11 @@ export function Analytics() {
         <Card variant="glass">
           <CardContent className="pt-6">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
-                <Activity size={20} className="text-purple-400" />
+              <div className="w-10 h-10 rounded-xl bg-brand-500/15 border border-brand-500/20 flex items-center justify-center">
+                <Activity size={20} className="text-brand-300" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Avg Tokens/Request</p>
+                <p className="text-sm text-ink-2">Avg Tokens/Request</p>
                 <p className="text-2xl font-bold text-white">{formatNumber(avgTokensPerRequest)}</p>
               </div>
             </div>
@@ -101,11 +101,11 @@ export function Analytics() {
         <Card variant="glass">
           <CardContent className="pt-6">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center">
-                <DollarSign size={20} className="text-blue-400" />
+              <div className="w-10 h-10 rounded-xl bg-accent-500/15 border border-accent-500/20 flex items-center justify-center">
+                <DollarSign size={20} className="text-accent-400" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Avg Cost/Request</p>
+                <p className="text-sm text-ink-2">Avg Cost/Request</p>
                 <p className="text-2xl font-bold text-white">{formatCurrency(stats.avgCostPerRequest, 4)}</p>
               </div>
             </div>
@@ -115,11 +115,11 @@ export function Analytics() {
         <Card variant="glass">
           <CardContent className="pt-6">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
-                <Zap size={20} className="text-amber-400" />
+              <div className="w-10 h-10 rounded-xl bg-warning-500/15 border border-warning-500/20 flex items-center justify-center">
+                <Zap size={20} className="text-warning-400" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Avg Latency</p>
+                <p className="text-sm text-ink-2">Avg Latency</p>
                 <p className="text-2xl font-bold text-white">{Math.round(stats.avgLatency)}ms</p>
               </div>
             </div>
@@ -140,18 +140,18 @@ export function Analytics() {
                 <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorRequests" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
+                      <stop offset="5%" stopColor="#4deeea" stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor="#4deeea" stopOpacity={0}/>
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="#9ca3af" />
-                  <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="#74828f" />
+                  <YAxis tick={{ fontSize: 10 }} stroke="#74828f" />
                   <Tooltip
-                    contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }}
-                    labelStyle={{ color: '#f3f4f6' }}
+                    contentStyle={{ backgroundColor: '#0D1117', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}
+                    labelStyle={{ color: '#F8FAFC' }}
                   />
-                  <Area type="monotone" dataKey="requests" stroke="#8b5cf6" fillOpacity={1} fill="url(#colorRequests)" />
+                  <Area type="monotone" dataKey="requests" stroke="#4deeea" fillOpacity={1} fill="url(#colorRequests)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -181,7 +181,7 @@ export function Analytics() {
                     ))}
                   </Pie>
                   <Tooltip
-                    contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }}
+                    contentStyle={{ backgroundColor: '#0D1117', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -190,7 +190,7 @@ export function Analytics() {
                   <div key={item.name} className="flex items-center justify-between text-sm">
                     <div className="flex items-center gap-2">
                       <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
-                      <span className="text-gray-400 truncate max-w-[120px]">{item.name}</span>
+                      <span className="text-ink-2 truncate max-w-[120px]">{item.name}</span>
                     </div>
                     <span className="text-white font-medium">{item.value}</span>
                   </div>
@@ -209,13 +209,13 @@ export function Analytics() {
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={taskChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="#9ca3af" angle={-45} textAnchor="end" height={60} />
-                  <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis dataKey="name" tick={{ fontSize: 10 }} stroke="#74828f" angle={-45} textAnchor="end" height={60} />
+                  <YAxis tick={{ fontSize: 10 }} stroke="#74828f" />
                   <Tooltip
-                    contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }}
+                    contentStyle={{ backgroundColor: '#0D1117', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}
                   />
-                  <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="value" fill="#7dd3fc" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -231,13 +231,13 @@ export function Analytics() {
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="#9ca3af" />
-                  <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" tickFormatter={(v) => `$${v.toFixed(2)}`} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="#74828f" />
+                  <YAxis tick={{ fontSize: 10 }} stroke="#74828f" tickFormatter={(v) => `$${v.toFixed(2)}`} />
                   <Tooltip
-                    contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }}
+                    contentStyle={{ backgroundColor: '#0D1117', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}
                   />
-                  <Bar dataKey="cost" fill="#ef4444" name="Cost" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="cost" fill="#fb7185" name="Cost" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="savings" fill="#10b981" name="Savings" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>

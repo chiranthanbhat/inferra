@@ -1,273 +1,198 @@
-import { initializeApp, getApps } from 'firebase/app';
-import { 
-  getAuth, 
-  GoogleAuthProvider, 
-  signInWithPopup, 
+// ============================================
+// FIREBASE INITIALIZATION
+// App + Auth + Firestore + Functions. All config comes from VITE_* env vars.
+// Never hardcode real keys here. See .env.example / PRODUCTION_SETUP.md.
+// ============================================
+
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
-  User as FirebaseUser,
   sendPasswordResetEmail,
-  updateProfile
+  sendEmailVerification,
+  updateProfile,
+  type User as FirebaseUser,
 } from 'firebase/auth';
-import { 
-  getFirestore, 
-  doc, 
-  getDoc, 
-  setDoc, 
-  updateDoc, 
-  collection, 
-  query, 
-  where, 
-  orderBy, 
-  limit,
-  getDocs,
-  addDoc,
-  serverTimestamp,
-  Timestamp,
-  increment
-} from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
+import { getFunctions } from 'firebase/functions';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import { getStorage } from 'firebase/storage';
+import { friendlyAuthError, logAuthError, isBenignAuthError } from './authErrors';
 
-// Firebase Configuration
-// In production, these would be environment variables
+// True only when a real project is configured. Lets the UI show a clear
+// "not configured" state in local dev instead of throwing cryptic errors.
+export const firebaseConfigured = Boolean(
+  import.meta.env.VITE_FIREBASE_API_KEY && import.meta.env.VITE_FIREBASE_PROJECT_ID,
+);
+
+/** Minimum password length enforced by the sign-up form. Firebase Auth accepts 6+, we require 8+. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+// When unconfigured (local dev without env), fall back to inert placeholders so
+// the SDK initialises without throwing `auth/invalid-api-key` at import time.
+// AuthProvider never attaches a listener while unconfigured, so these are never used.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "demo-api-key",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "inferra-demo.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "inferra-demo",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "inferra-demo.appspot.com",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "123456789",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:123456789:web:abc123"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'demo-api-key',
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'inferra-demo.firebaseapp.com',
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'inferra-demo',
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'inferra-demo.appspot.com',
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '000000000000',
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:000000000000:web:0000000000000000',
 };
 
-// Initialize Firebase (prevent re-initialization)
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+// App Check (reCAPTCHA v3). Activates only when a real project + site key are
+// configured — see PRODUCTION_SETUP.md. Pair with ENFORCE_APPCHECK=true on the
+// Cloud Functions side to reject tokens-less callable traffic.
+const appCheckSiteKey = import.meta.env.VITE_APPCHECK_SITE_KEY as string | undefined;
+if (firebaseConfigured && appCheckSiteKey) {
+  try {
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(appCheckSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch {
+    /* double-init under HMR — harmless */
+  }
+}
+
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const functions = getFunctions(app, import.meta.env.VITE_FIREBASE_FUNCTIONS_REGION || 'us-central1');
 export const storage = getStorage(app);
 
-// Auth Providers
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-// Auth Functions
-export async function signInWithGoogle() {
+export type AuthResult = {
+  user: FirebaseUser | null;
+  error: string | null;
+  /**
+   * True when the account was created but the verification email did NOT go out.
+   * The caller (sign-up UI) should nudge the user to click Resend on the verify page.
+   * Non-fatal: authentication itself succeeded.
+   */
+  verificationSendFailed?: boolean;
+};
+
+function friendly(error: unknown): string {
+  return friendlyAuthError(error);
+}
+
+/** Sign in with Google via popup. Cancellations are surfaced as a friendly message but not logged. */
+export async function signInWithGoogle(): Promise<AuthResult> {
   try {
     const result = await signInWithPopup(auth, googleProvider);
-    await createOrUpdateUserDocument(result.user);
     return { user: result.user, error: null };
-  } catch (error: any) {
-    return { user: null, error: error.message };
+  } catch (error: unknown) {
+    if (!isBenignAuthError(error)) logAuthError({ action: 'signInGoogle' }, error);
+    return { user: null, error: friendly(error) };
   }
 }
 
-export async function signInWithEmail(email: string, password: string) {
+/** Sign in with email + password. */
+export async function signInWithEmail(email: string, password: string): Promise<AuthResult> {
   try {
     const result = await signInWithEmailAndPassword(auth, email, password);
-    await createOrUpdateUserDocument(result.user);
     return { user: result.user, error: null };
-  } catch (error: any) {
-    return { user: null, error: error.message };
+  } catch (error: unknown) {
+    logAuthError({ action: 'signInEmail', email }, error);
+    return { user: null, error: friendly(error) };
   }
 }
 
-export async function signUpWithEmail(email: string, password: string, name: string) {
+/**
+ * Create an account, set the display name, and dispatch a verification email.
+ * The Firebase account creation and the verification-email send are separate
+ * failure modes; we distinguish them so the UI can react correctly:
+ *   • account create failed → `error` set, `user` null
+ *   • account created but verification send failed →
+ *     `user` populated, `error` null, `verificationSendFailed: true`
+ * Network errors on verification send are treated as non-fatal transient (the
+ * user can hit "Resend" on the verify page); auth/quota-exceeded or auth/too-many-
+ * requests are surfaced through the flag so the UI can show a targeted message.
+ */
+export async function signUpWithEmail(email: string, password: string, name: string): Promise<AuthResult> {
+  let result: Awaited<ReturnType<typeof createUserWithEmailAndPassword>>;
   try {
-    const result = await createUserWithEmailAndPassword(auth, email, password);
-    await updateProfile(result.user, { displayName: name });
-    await createOrUpdateUserDocument(result.user, { name });
-    return { user: result.user, error: null };
-  } catch (error: any) {
-    return { user: null, error: error.message };
+    result = await createUserWithEmailAndPassword(auth, email, password);
+  } catch (error: unknown) {
+    logAuthError({ action: 'signUp', email }, error);
+    return { user: null, error: friendly(error) };
   }
+
+  if (name) {
+    try {
+      await updateProfile(result.user, { displayName: name });
+    } catch (error: unknown) {
+      // Non-fatal — the profile can still be filled in later.
+      logAuthError({ action: 'signUp', email, extra: { step: 'updateProfile' } }, error);
+    }
+  }
+
+  let verificationSendFailed = false;
+  try {
+    await sendEmailVerification(result.user);
+  } catch (error: unknown) {
+    const code = (error as { code?: string } | null)?.code ?? '';
+    // Transient network hiccups are non-fatal AND non-flag-raising — Firebase
+    // will retry on Resend and there's no useful signal to surface.
+    if (code !== 'auth/network-request-failed') {
+      verificationSendFailed = true;
+      logAuthError({ action: 'verifyEmail', email, extra: { step: 'initialSend' } }, error);
+    }
+  }
+
+  return { user: result.user, error: null, verificationSendFailed };
 }
 
-export async function signOut() {
+/** Sign the current user out. */
+export async function signOut(): Promise<{ error: string | null }> {
   try {
     await firebaseSignOut(auth);
     return { error: null };
-  } catch (error: any) {
-    return { error: error.message };
+  } catch (error: unknown) {
+    logAuthError({ action: 'signOut' }, error);
+    return { error: friendly(error) };
   }
 }
 
-export async function resetPassword(email: string) {
+/**
+ * Send a password-reset email. To avoid user enumeration, the calling UI
+ * should render the same confirmation regardless of the return value —
+ * callers can still log the raw error via the returned string in dev.
+ */
+export async function resetPassword(email: string): Promise<{ error: string | null }> {
   try {
     await sendPasswordResetEmail(auth, email);
     return { error: null };
-  } catch (error: any) {
-    return { error: error.message };
+  } catch (error: unknown) {
+    logAuthError({ action: 'resetPassword', email }, error);
+    return { error: friendly(error) };
   }
 }
 
+/** Re-send the verification email to the currently signed-in user. */
+export async function resendVerification(): Promise<{ error: string | null }> {
+  try {
+    if (!auth.currentUser) return { error: 'You are not signed in.' };
+    await sendEmailVerification(auth.currentUser);
+    return { error: null };
+  } catch (error: unknown) {
+    logAuthError({ action: 'verifyEmail', email: auth.currentUser?.email ?? undefined, extra: { step: 'resend' } }, error);
+    return { error: friendly(error) };
+  }
+}
+
+/** Subscribe to Firebase Auth state changes. Returns the unsubscribe fn. */
 export function onAuthChange(callback: (user: FirebaseUser | null) => void) {
   return onAuthStateChanged(auth, callback);
 }
 
-// User Document Management
-async function createOrUpdateUserDocument(user: FirebaseUser, additionalData?: Record<string, any>) {
-  const userRef = doc(db, 'users', user.uid);
-  const userSnap = await getDoc(userRef);
-
-  if (!userSnap.exists()) {
-    // Create new user with default organization
-    const orgId = `org_${user.uid}`;
-    
-    // Create organization first
-    await setDoc(doc(db, 'organizations', orgId), {
-      id: orgId,
-      name: `${user.displayName || user.email}'s Organization`,
-      ownerId: user.uid,
-      plan: 'free',
-      planLimits: {
-        requestsPerMonth: 100,
-        usersLimit: 1,
-        teamsLimit: 1
-      },
-      usage: {
-        requestsUsed: 0,
-        totalSpend: 0,
-        totalSavings: 0,
-        tokensProcessed: 0
-      },
-      settings: {
-        defaultModel: 'gpt-4o-mini',
-        enableOptimization: true,
-        enableRouting: true,
-        enableGovernance: true,
-        piiPolicy: 'sanitize',
-        secretPolicy: 'block'
-      },
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-
-    // Create user document
-    await setDoc(userRef, {
-      id: user.uid,
-      email: user.email,
-      name: user.displayName || additionalData?.name || 'User',
-      photoURL: user.photoURL,
-      organizationId: orgId,
-      role: 'owner',
-      teamIds: [],
-      isAdmin: false,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      lastLoginAt: serverTimestamp()
-    });
-  } else {
-    // Update last login
-    await updateDoc(userRef, {
-      lastLoginAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  }
-}
-
-// Firestore Helper Functions
-export async function getUserData(userId: string) {
-  const userDoc = await getDoc(doc(db, 'users', userId));
-  return userDoc.exists() ? userDoc.data() : null;
-}
-
-export async function getOrganization(orgId: string) {
-  const orgDoc = await getDoc(doc(db, 'organizations', orgId));
-  return orgDoc.exists() ? orgDoc.data() : null;
-}
-
-export async function updateOrganization(orgId: string, data: Record<string, any>) {
-  await updateDoc(doc(db, 'organizations', orgId), {
-    ...data,
-    updatedAt: serverTimestamp()
-  });
-}
-
-// Request Tracking
-export async function saveRequest(orgId: string, userId: string, requestData: any) {
-  const requestRef = await addDoc(collection(db, 'requests'), {
-    organizationId: orgId,
-    userId,
-    ...requestData,
-    createdAt: serverTimestamp()
-  });
-
-  // Update organization usage
-  await updateDoc(doc(db, 'organizations', orgId), {
-    'usage.requestsUsed': increment(1),
-    'usage.totalSpend': increment(requestData.actualCost || 0),
-    'usage.totalSavings': increment(requestData.savings || 0),
-    'usage.tokensProcessed': increment(requestData.totalTokens || 0),
-    updatedAt: serverTimestamp()
-  });
-
-  return requestRef.id;
-}
-
-export async function getRequests(orgId: string, limitCount: number = 50) {
-  const q = query(
-    collection(db, 'requests'),
-    where('organizationId', '==', orgId),
-    orderBy('createdAt', 'desc'),
-    limit(limitCount)
-  );
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-}
-
-// Analytics
-export async function getAnalytics(orgId: string, startDate: Date, endDate: Date) {
-  const q = query(
-    collection(db, 'requests'),
-    where('organizationId', '==', orgId),
-    where('createdAt', '>=', Timestamp.fromDate(startDate)),
-    where('createdAt', '<=', Timestamp.fromDate(endDate)),
-    orderBy('createdAt', 'desc')
-  );
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-}
-
-// Team Management
-export async function createTeam(orgId: string, teamData: any) {
-  const teamRef = await addDoc(collection(db, 'teams'), {
-    organizationId: orgId,
-    ...teamData,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  });
-  return teamRef.id;
-}
-
-export async function getTeams(orgId: string) {
-  const q = query(
-    collection(db, 'teams'),
-    where('organizationId', '==', orgId)
-  );
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-}
-
-// Governance Events
-export async function logGovernanceEvent(orgId: string, userId: string, eventData: any) {
-  await addDoc(collection(db, 'governanceEvents'), {
-    organizationId: orgId,
-    userId,
-    ...eventData,
-    createdAt: serverTimestamp()
-  });
-}
-
-// Audit Logs
-export async function createAuditLog(orgId: string, userId: string, action: string, details: any) {
-  await addDoc(collection(db, 'auditLogs'), {
-    organizationId: orgId,
-    userId,
-    action,
-    details,
-    createdAt: serverTimestamp()
-  });
-}
-
-export { Timestamp };
+export type { FirebaseUser };

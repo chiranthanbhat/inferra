@@ -9,20 +9,20 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = 'primary', size = 'md', isLoading, children, disabled, ...props }, ref) => {
-    const baseStyles = 'inline-flex items-center justify-center font-semibold rounded-xl transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-teal-500/50 disabled:opacity-50 disabled:cursor-not-allowed';
-    
+    const baseStyles = 'relative inline-flex items-center justify-center font-semibold rounded-xl transition-all duration-200 ease-out focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.985] select-none';
+
     const variants = {
-      primary: 'bg-gradient-to-r from-teal-600 to-rose-600 hover:from-teal-500 hover:to-rose-500 text-white shadow-lg shadow-teal-500/25 hover:shadow-teal-500/40',
-      secondary: 'bg-navy-800 hover:bg-navy-700 text-white border border-white/10',
-      ghost: 'bg-transparent hover:bg-white/5 text-gray-300 hover:text-white',
-      danger: 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/25',
-      outline: 'bg-transparent border border-teal-500/50 text-teal-400 hover:bg-teal-500/10 hover:border-teal-500',
+      primary: 'text-[#04211f] bg-gradient-to-br from-brand-400 to-accent-500 hover:from-brand-300 hover:to-accent-400 shadow-[0_8px_24px_-10px_rgba(77,238,234,0.55),inset_0_1px_0_rgba(255,255,255,0.4)] hover:shadow-[0_14px_34px_-10px_rgba(77,238,234,0.7),inset_0_1px_0_rgba(255,255,255,0.5)]',
+      secondary: 'bg-white/[0.06] hover:bg-white/[0.1] text-white border border-white/10 hover:border-white/20 backdrop-blur-sm',
+      ghost: 'bg-transparent hover:bg-white/[0.06] text-ink-2 hover:text-white',
+      danger: 'bg-error-500 hover:brightness-110 text-white shadow-[0_8px_24px_-8px_rgba(244,63,94,0.55)]',
+      outline: 'bg-transparent border border-brand-500/40 text-brand-300 hover:bg-brand-500/10 hover:border-brand-400/70',
     };
 
     const sizes = {
-      sm: 'text-xs px-3 py-1.5 gap-1.5',
-      md: 'text-sm px-4 py-2.5 gap-2',
-      lg: 'text-base px-6 py-3.5 gap-2.5',
+      sm: 'text-xs px-3.5 py-2 gap-1.5',
+      md: 'text-sm px-5 py-2.5 gap-2',
+      lg: 'text-[0.95rem] px-7 py-3.5 gap-2.5',
     };
 
     return (

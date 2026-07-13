@@ -1,0 +1,288 @@
+rules_version = '2';
+
+// ============================================
+// INFERRA FIRESTORE SECURITY RULES — v2 (multi-tenant)
+// Principle: everything is organization-scoped. Clients can only read/write
+// data that belongs to an organization they're a member of, and only the
+// fields their role permits. Plan / usage / billing / subscription fields on
+// the organization document are FUNCTION-ONLY — the client can't set them.
+//
+// Role hierarchy (owner > admin > manager > member > viewer) is mirrored on
+// the client (src/lib/permissions.ts) for UI gating; server rules re-check.
+// ============================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- primitive helpers ----
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+    function isAdminUser() {
+      return isSignedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    // ---- membership helpers ----
+    function memberDoc(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid)).data;
+    }
+    function isMember(orgId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid));
+    }
+    function memberRole(orgId) {
+      return memberDoc(orgId).role;
+    }
+    function isOrgOwner(orgId) {
+      return isMember(orgId) && memberRole(orgId) == 'owner';
+    }
+    function isOrgAdmin(orgId) {
+      return isMember(orgId) && (memberRole(orgId) == 'owner' || memberRole(orgId) == 'admin');
+    }
+    function isOrgManager(orgId) {
+      return isMember(orgId)
+        && (memberRole(orgId) == 'owner'
+            || memberRole(orgId) == 'admin'
+            || memberRole(orgId) == 'manager');
+    }
+
+    // Only these keys are allowed on organization update from a client; the
+    // rest (plan, planLimits, usage, subscriptionStatus, razorpay*, monthlyResetDate)
+    // are function-only.
+    function orgSettableKeys() {
+      return ['name', 'settings', 'notifications', 'branding',
+              'timezone', 'country', 'logo', 'updatedAt'];
+    }
+
+    // ---- USERS ----
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdminUser();
+
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+          'email', 'email_lower', 'name', 'photoURL', 'emailVerified',
+          'onboarded', 'activeOrganizationId', 'isAdmin',
+          'createdAt', 'updatedAt', 'lastLoginAt'
+        ])
+        && request.resource.data.email is string
+        && request.resource.data.isAdmin == false
+        && request.resource.data.onboarded == false
+        && request.resource.data.activeOrganizationId is string;
+
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['name', 'photoURL', 'onboarded', 'emailVerified',
+                     'lastLoginAt', 'updatedAt', 'email_lower',
+                     'activeOrganizationId']);
+
+      allow delete: if false;
+
+      // Membership mirror — the user reads their own set; server writes
+      // authoritatively for cross-org member changes. First-login and
+      // self-heal transactions are permitted to write the OWN owner mirror.
+      match /memberships/{orgId} {
+        allow read: if isOwner(uid) || isAdminUser();
+        allow create: if isOwner(uid)
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.organizationId == orgId
+          && request.resource.data.role == 'owner';
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['lastAccessedAt', 'organizationName']);
+        allow delete: if false;
+      }
+    }
+
+    // ---- ORGANIZATIONS ----
+    match /organizations/{orgId} {
+      allow read: if isMember(orgId) || isAdminUser();
+
+      // Client can create a personal org for themselves on the FREE plan.
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'name', 'ownerId', 'plan', 'planLimits', 'usage', 'settings',
+          'notifications', 'subscriptionStatus', 'monthlyResetDate',
+          'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.plan == 'free'
+        && request.resource.data.subscriptionStatus == 'none'
+        && request.resource.data.usage.requestsUsed == 0;
+
+      // Managers+ may rename / edit settings / notifications / branding /
+      // profile / logo. Billing fields are function-only via the key
+      // whitelist below.
+      allow update: if isOrgManager(orgId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(orgSettableKeys());
+
+      allow delete: if false; // Owner-only delete goes through a callable.
+
+      // ---- members subcollection ----
+      match /members/{memberId} {
+        allow read: if isMember(orgId) || isAdminUser();
+
+        // Owner-of-org may self-provision their own owner-member doc on first
+        // login (matches ensureUserProfile transaction). All other membership
+        // mutations go through Cloud Functions (Team Management iteration).
+        allow create: if isOwner(memberId)
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.role == 'owner'
+          && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---- USAGE (server-written; read scoped by org membership) ----
+    match /usage/{id} {
+      allow read: if isSignedIn()
+        && (isMember(resource.data.organizationId) || isAdminUser());
+      allow write: if false;
+    }
+
+    // ---- ANALYTICS (admin-read; server-written) ----
+    match /analytics/{id} {
+      allow read: if isAdminUser();
+      allow write: if false;
+    }
+
+    // ---- CHATS + MESSAGES (owner-of-chat, verified) ----
+    match /chats/{chatId} {
+      allow read: if isVerified() && resource.data.userId == request.auth.uid;
+      allow create: if isVerified()
+        && request.resource.data.userId == request.auth.uid
+        && isMember(request.resource.data.organizationId);
+      allow update, delete: if isVerified() && resource.data.userId == request.auth.uid;
+
+      match /messages/{messageId} {
+        allow read, write: if isVerified()
+          && get(/databases/$(database)/documents/chats/$(chatId)).data.userId == request.auth.uid;
+      }
+    }
+
+    // ---- WORKSPACE TEAMS (normalized; ALL mutations via Cloud Functions) ----
+    // TEAM VISIBILITY IS ENFORCED HERE, not just in the UI: owners/admins see
+    // every team; everyone else can only read documents of teams they belong
+    // to (membership row `team_members/{teamId}_{uid}` must exist). Scoped
+    // clients therefore fetch teams by id from their membership rows — a
+    // broad org-wide list query would be rejected for them by design.
+    function inTeam(teamId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/team_members/$(teamId + '_' + request.auth.uid));
+    }
+    match /teams/{teamId} {
+      allow read: if isSignedIn()
+        && (isOrgAdmin(resource.data.organizationId) || inTeam(teamId) || isAdminUser());
+      allow write: if false;
+    }
+    match /team_members/{id} {
+      // Own rows always readable (drives access scoping); other rows only for
+      // teams you belong to, or org admins.
+      allow read: if isSignedIn()
+        && (resource.data.userId == request.auth.uid
+            || isOrgAdmin(resource.data.organizationId)
+            || inTeam(resource.data.teamId)
+            || isAdminUser());
+      allow write: if false;
+    }
+    match /team_permissions/{teamId} {
+      allow read: if isSignedIn()
+        && (isOrgAdmin(resource.data.organizationId) || inTeam(teamId) || isAdminUser());
+      allow write: if false;
+    }
+    match /team_settings/{teamId} {
+      allow read: if isSignedIn()
+        && (isOrgAdmin(resource.data.organizationId) || inTeam(teamId) || isAdminUser());
+      allow write: if false;
+    }
+    match /team_activity/{id} {
+      allow read: if isSignedIn()
+        && (isOrgAdmin(resource.data.organizationId) || inTeam(resource.data.teamId) || isAdminUser());
+      allow write: if false;
+    }
+    // Owner-defined custom permissions (assignable to teams via functions).
+    match /organizations/{orgId}/customPermissions/{permId} {
+      allow read: if isMember(orgId) || isAdminUser();
+      allow write: if false;
+    }
+
+    // ---- AUDIT LOGS ----
+    // Managers+ within the org (or platform admins) may read.
+    // Clients may WRITE their own audit entries with actorId == uid (e.g.
+    // settings changes / org switches) — the write path is a strict whitelist
+    // so an attacker can't smuggle a synthetic event impersonating someone else.
+    match /auditLogs/{id} {
+      allow read: if isSignedIn()
+        && (isAdminUser() || isOrgAdmin(resource.data.organizationId));
+
+      allow create: if isVerified()
+        && request.resource.data.actorId == request.auth.uid
+        && isMember(request.resource.data.organizationId)
+        && request.resource.data.keys().hasOnly([
+          'organizationId', 'actorId', 'actorEmail', 'actorName',
+          'eventType', 'action', 'details', 'ipAddress', 'userAgent', 'createdAt'
+        ]);
+      allow update, delete: if false;
+    }
+
+    // ---- INVITATIONS ----
+    // All mutations flow through Cloud Functions (invite/accept/reject/cancel/
+    // resend). Readable by: org managers+ (to manage the pending list), the
+    // invitee (matched by verified token email), and platform admins.
+    match /invitations/{id} {
+      allow read: if isSignedIn()
+        && (isOrgManager(resource.data.organizationId)
+            || (isVerified()
+                && request.auth.token.email != null
+                && resource.data.email_lower == request.auth.token.email.lower())
+            || isAdminUser());
+      allow write: if false;
+    }
+
+    // ---- NOTIFICATIONS (server-written; owner may read + mark read) ----
+    match /notifications/{id} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      // The only client mutation allowed is flipping the read flag on your own.
+      allow update: if isSignedIn()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if false;
+    }
+
+    // ---- INVOICES (webhook-written; org billing roles read) ----
+    match /invoices/{id} {
+      allow read: if isSignedIn()
+        && (isAdminUser()
+            || (resource.data.organizationId != null && isOrgAdmin(resource.data.organizationId)));
+      allow write: if false;
+    }
+
+    // ---- MAIL QUEUE (Trigger Email extension; never client-accessible) ----
+    match /mail/{id} {
+      allow read, write: if false;
+    }
+
+    // ---- ORG USAGE ROLLUPS (server-written; members read) ----
+    match /organizations/{orgId}/usageDaily/{day} {
+      allow read: if isMember(orgId) || isAdminUser();
+      allow write: if false;
+    }
+    match /organizations/{orgId}/usageMonthly/{month} {
+      allow read: if isMember(orgId) || isAdminUser();
+      allow write: if false;
+    }
+
+    // Default deny.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
